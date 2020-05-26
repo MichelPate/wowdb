@@ -108,6 +108,7 @@ class SpellDescriptionParser (object):
         gt = Literal(">")
         eq = Literal("=")
         deq = Literal("==")
+        eol = LineEnd().suppress()
 
         # Reusables
         spellId =  Word(nums, min=2, max=6).addParseAction(tokenMap(int)).setResultsName("spellId")
@@ -195,22 +196,22 @@ class SpellDescriptionParser (object):
             steps.append(parser.transformString(steps[-1]))
         result = steps[-1]
     
-        # Colors - A bit dirty atm
-        endTag = ((vbar + (Literal("r")|Literal("R")))).addParseAction(lambda t: "</span>")
+        # Colors
+        endTag = ((vbar + (Literal("r")|Literal("R"))|eol))
         parser = (
             Suppress(vbar + (Literal("c")|Literal("C"))) + 
-            Word(hexnums, exact=8).setResultsName("hex")
+            Word(hexnums, exact=8).setResultsName("hex") + 
+            SkipTo(endTag).setResultsName("content") + 
+            Suppress(endTag)
         ).addParseAction(self.colorize)
 
-        openTagColorCount = len(parser.searchString(result))
-        closeTagColorCount = len (endTag.searchString(result))
-        diffCount = openTagColorCount-closeTagColorCount
-        if diffCount > 0 :
-            for i in range (diffCount):
-                result+= "|r"
-        result = parser.transformString(result)
-        result = endTag.transformString(result)
-        
+        new_result = parser.transformString(result)
+        result = parser.transformString(new_result)
+
+        while(new_result != result):
+            new_result = result
+            result = parser.transformString(new_result)
+
         # Replace each Sha1 Hash placeholder by refering value
         if verbose :
             for k, v in self.variables.items():
@@ -275,7 +276,7 @@ class SpellDescriptionParser (object):
 
     def colorize (self, t):
         hexRGB = "".join(list(t.hex)[:6])
-        return "<span style=\"color:#{};\">".format(hexRGB)
+        return "<span style=\"color:#{};\">{}</span>".format(hexRGB, t.content)
 
     def registerVariable (self, t):
         # SHA1 Hash, only 8char should be enough

@@ -15,7 +15,6 @@ class Difficulty (AbstractModel):
     def __init__ (self, id, **kwargs):
         super (Difficulty, self).__init__(id, **kwargs)
 
-
 class PowerType (AbstractModel):
     TABLE = {"table":"PowerType", "id_field":"PowerTypeEnum"}
     def __init__ (self, id, **kwargs):

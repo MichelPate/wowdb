@@ -7,7 +7,6 @@ from ..utilities import FormatOutput, formatTime, formatDistance, formatAngle, a
 from ..parsers import SpellDescriptionParser
 from ..constants import SCHOOL_MASKS, SPELLS_FLAGS, SUBEFFECT_TYPES, EFFECT_TYPES, SUBEFFECT_TYPES, EFFECT_MISC_TYPES
 
-
 class ChrUnitMeasurement (object):
     _UNIT = ""
     def __init__ (self):

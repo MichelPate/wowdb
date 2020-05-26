@@ -13,6 +13,10 @@ intFloat = lambda v : int(v) if isinstance(v, float) and v.is_integer() else v
 def s (**kwargs):
     return 'style="font-family:\'{font}\';font-size:{size}px;color:{color};font-weight:{weight};"'.format(font=kwargs.get("font", "Decorative"), size=kwargs.get("size", 10), weight=kwargs.get("weight", 400),color=rgbHex(kwargs.get("color", (255,255,255))))
 
+def enum(*sequential, **named):
+    enums = dict(zip(sequential, range(len(sequential))), **named)
+    return type('Enum', (), enums)
+    
 def toCamelCase (text, separators="_-"):
     cleaned = re.sub('[{}](.)'.format(separators), lambda x: x.group(1).upper(), text)
     return cleaned[0].lower() + cleaned[1:]
