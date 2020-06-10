@@ -1,35 +1,13 @@
 from .abstract import AbstractModel
-from .misc import PowerType, Difficulty, ManifestInterfaceData
+from .gametable import CombatRatingsMultByILvl
+from .misc import PowerType, Difficulty, ManifestInterfaceData, RandPropPoints
 from .character import ChrSpecialization, ChrClasses
 from .creature import CreatureType
 from ..manager import DB
-from ..utilities import FormatOutput, formatTime, formatDistance, formatAngle, arrayFromB32, intFloat, s 
+from ..units import ChrUnitBasePoint, ChrUnitSpellPower, ChrUnitAttackPower
+from ..utilities import chunks, FormatOutput, formatTime, formatDistance, formatAngle, arrayFromB32, intFloat, s 
 from ..parsers import SpellDescriptionParser
-from ..constants import SCHOOL_MASKS, SPELLS_FLAGS, SUBEFFECT_TYPES, EFFECT_TYPES, SUBEFFECT_TYPES, EFFECT_MISC_TYPES
-
-class ChrUnitMeasurement (object):
-    _UNIT = ""
-    def __init__ (self):
-        super (ChrUnitMeasurement, self).__init__()
-    def __str__ (self):
-        return "{}".format(self._UNIT)
-
-class ChrUnitPower (ChrUnitMeasurement):
-    _UNIT = ""
-    def __init__ (self):
-        super (ChrUnitPower, self).__init__()
-    def __str__ (self):
-        return "% of {} power".format(self._UNIT)
-
-class ChrUnitSpellPower (ChrUnitPower):
-    _UNIT = "Spell"
-    def __init__ (self):
-        super (ChrUnitSpellPower, self).__init__()
-
-class ChrUnitAttackPower (ChrUnitPower):
-    _UNIT = "Attack"
-    def __init__ (self):
-        super (ChrUnitAttackPower, self).__init__()
+from ..constants import SCHOOL_MASKS, SPELLS_FLAGS, SUBEFFECT_TYPES, EFFECT_TYPES, SUBEFFECT_TYPES, EFFECT_MISC_TYPES, ITEM_DEFAULT_ILVL
 
 SPELL_CLASS_MASKS_ALL = {i:list(set([x["SpellClassMask_{}".format(i)] for x in DB["SpellClassOptions"].find({"SpellClassMask_{}".format(i):{'$gt': 0}})])) for i in range (1,5)}
 
@@ -37,8 +15,6 @@ class SpellXDescriptionVariables (AbstractModel):
     TABLE = {"table":"SpellXDescriptionVariables", "id_field":"id"}
     def __init__ (self, id, **kwargs):
         super (SpellXDescriptionVariables, self).__init__(id, **kwargs)
-
-
 
 class SpellDescriptionVariables (AbstractModel):
     TABLE = {"table":"SpellDescriptionVariables", "id_field":"id"}
@@ -80,14 +56,45 @@ class SpellCastTimes (AbstractModel):
     def __init__ (self, id, **kwargs):
         super (SpellCastTimes, self).__init__(id, **kwargs)
 
+class SpellScaling (AbstractModel):
+    TABLE = {"table":"SpellScaling", "id_field":"id"}
+    def __init__ (self, id, **kwargs):
+        super (SpellScaling, self).__init__(id, **kwargs)
+
+class Talent (AbstractModel):
+    TABLE = {"table":"Talent", "id_field":"id"}
+    def __init__ (self, id, **kwargs):
+        super (Talent, self).__init__(id, **kwargs)
+    
+    def getSpell (self):
+        spell = Spell (self.spellID)
+        if spell.exists : 
+            return spell
+    
+    def getChrSpecs (self):
+        return next(iter(ChrSpecialization.FindReference({"id":self.specID, "classID":self.classID})),None)
+
+    @classmethod
+    def getTree (cls, specId):
+        spec = ChrSpecialization(specId)
+        talents = []
+        for row in range(7):
+            for col in range (3):
+                talent = next(iter(cls.FindReference({"specID":specId, "tierID":row, "columnIndex":col})), False)
+                if not talent:
+                    talent = next(iter(cls.FindReference({"classID":spec.classID, "specID":0, "tierID":row, "columnIndex":col})), False)
+                talents.append(talent.spellID)
+        talents = chunks(loadManySpells(talents), 3)
+        return talents
+
 class SpellMisc (AbstractModel):
     TABLE = {"table":"SpellMisc", "id_field":"id", "id_parent_field":"id_parent"}
     def __init__ (self, id, **kwargs):
         super (SpellMisc, self).__init__(id, **kwargs)
     
-    def getIcon (self, **kwargs):
+    def getIcon (self, size=35,**kwargs):
         uiData = ManifestInterfaceData(self.spellIconFileDataID)
-        return uiData.getIcon(**kwargs)
+        return uiData.getIcon(size, **kwargs)
     
     @FormatOutput(formatTime)
     def getCastTime (self):
@@ -130,12 +137,14 @@ class SpellMisc (AbstractModel):
         flags = self.getFlags()
         return any(x for x in flags if "passive" in x.lower())
 
-    def getFlags (self):
+    def getFlags (self, verbose=True):
         enableIndices = []
         for idx, n in self.attributes.items():
             b32 = '{:032b}'.format(n)
             enableIndices += [((idx-1)*32)+int(i) for i,v in enumerate(reversed(b32)) if v == "1"]
-        return [SPELLS_FLAGS[x] for x in enableIndices if x in SPELLS_FLAGS]
+        if verbose: 
+            return [SPELLS_FLAGS[x] for x in enableIndices if x in SPELLS_FLAGS]
+        return enableIndices
 
 class SpellCategory (AbstractModel):
     TABLE = {"table":"SpellCategory", "id_field":"id"}
@@ -219,7 +228,9 @@ class SpellClassOptions (AbstractModel):
     
     def getChrClass (self):
         if self.spellClassSet != 0:
-            return ChrClasses[self.spellClassSet]
+            chrCls = next(iter(ChrClasses.FindReference({"spellClassSet":self.spellClassSet})), False)
+            if chrCls and chrCls.exists():
+                return chrCls
     
     def getChrClassName (self):
         chrClass = self.getChrClass()
@@ -347,16 +358,38 @@ class SpellEffect (AbstractModel):
         radiusRange = [x.radius if x else 0 for x in radiusObjects ]
         maxRadius = max(radiusRange)
         return maxRadius
-    
+
     def getRelatedValue (self):
-        mapCls = {"effectBasePointsF":float, "bonusCoefficientFromAP":ChrUnitAttackPower, "effectBonusCoefficient":ChrUnitSpellPower}
-        relatedValues = {k:getattr(self, k) for k in mapCls.keys() }
-        filteredDict = dict(filter(lambda x:x[1], relatedValues.items()))
-        filteredValues = filteredDict.items()
-        if filteredValues :
-            currentValue = next(iter(filteredValues))
-            k, v = currentValue
-            return  (v, mapCls[k]())
+        flags = self.parent.getFlags(verbose=False)
+        
+        # Scale with ilevel
+        if 354 in flags :         
+            ilvl = self.parent.ilevel
+
+            propPoints = RandPropPoints[ilvl]
+            crMult = CombatRatingsMultByILvl[ilvl]
+            scaling = self.parent.getScaling()
+            scalingClass = -1
+            if scaling :
+                scalingClass = getattr(scaling, "class")
+            if self.effectAura == 189:
+                amount = self.coefficient * propPoints.epic[1] * crMult.armorMultiplier
+            elif scalingClass  == -8 :
+                amount = self.coefficient * propPoints.damageReplaceStat    
+            elif scalingClass == -9 :
+                amount = self.coefficient * propPoints.damageSecondary
+            else :
+                amount = self.coefficient * propPoints.epic[1]
+            return (int(round (amount)), int)
+        else:
+            mapCls = {"effectBasePointsF":ChrUnitBasePoint, "bonusCoefficientFromAP":ChrUnitAttackPower, "effectBonusCoefficient":ChrUnitSpellPower}
+            relatedValues = {k:getattr(self, k) for k in mapCls.keys() }
+            filteredDict = dict(filter(lambda x:x[1], relatedValues.items()))
+            filteredValues = filteredDict.items()
+            if filteredValues :
+                currentValue = next(iter(filteredValues))
+                k, v = currentValue
+                return  (v, mapCls[k]())
 
     def getTriggerSpell (self, verbose=True, default=None):
         spellId = self.effectTriggerSpell
@@ -429,10 +462,14 @@ class Spell (AbstractModel):
     def __init__ (self, id, **kwargs):
         super (Spell, self).__init__(id, **kwargs)
         self.currentDifficulty = None
+        self.ilevel = kwargs.get("ilevel", ITEM_DEFAULT_ILVL)
         
     @property
     def name (self):
         return SpellName(self.id).name
+    
+    def setItemLevel (self, ilvl):
+        self.ilevel = ilvl
 
     def miscs(self):
         return SpellMisc.FromParent(self.id, parent=self)
@@ -466,16 +503,28 @@ class Spell (AbstractModel):
         if spec :
             return spec
     
+    def getScaling (self):
+        return next(iter(SpellScaling.Find({"SpellID":self.id})), None)
+
+    def getTalent (self):
+        return next(iter(Talent.FindReference({"spellID":self.id})),False)
+
     def getChrSpecs (self):
         spec = self.specialization()
         if spec :
             return [x.getChrSpecs() for x in spec]
+        else :
+            talent = self.getTalent()
+            if talent :
+                specs = talent.getChrSpecs()
+                if specs :
+                    return [specs]
         return []
     
     def getChrSpecsName (self):
-        spec = self.specialization()
+        spec = self.getChrSpecs()
         if spec :
-            return [x.getChrSpecsName() for x in spec]
+            return [x.name for x in spec]
         return []
 
     def classOptions(self):
@@ -633,8 +682,7 @@ class Spell (AbstractModel):
 
     def getDescription (self, text=None):
         desc = text or self.description
-        d = SpellDescriptionParser(desc, parent=self)
-        # print (d.getRelatedSpells())
+        d = SpellDescriptionParser(desc, parent=self, ilevel=self.ilevel)
         return d.getComputed()
     
     def getAuraDescription (self):
@@ -647,13 +695,14 @@ class Spell (AbstractModel):
         return self.getCurrentMisc().isPassive()
 
     def getDescriptionSpells (self):
-        d = SpellDescriptionParser(self.description, parent=self)
+        d = SpellDescriptionParser(self.description, parent=self, ilevel=self.ilevel)
         return d.getRelatedSpells()
 
     def getShortText (self, iconSize = 15):
         return '<span style="text-align: right;">{icon}</span> {name}'.format(icon=self.getIcon(size=iconSize, html=True), name=self.name)
 
     def getTooltipText(self, displayLevel=1):
+        flags = self.getFlags(verbose=False)
         lines = ""
         
         # Header
@@ -662,12 +711,17 @@ class Spell (AbstractModel):
         lines += '<td {style}>{name}</td>'.format(name=self.name, style = s(size=14, weight=700))
         lines += '<td style="text-align: right;">{icon}</td>'.format(icon=self.getIcon(size=35, html=True))
         lines += '</tr>'
+        if 354 in flags :
+            lines += '<tr>'
+            lines += '<td {style}>Item Level {ilvl}</td>'.format(ilvl = self.ilevel , style=s(size=12) )
+            lines += '</tr>'
         lines += '</table>'
         
         # Summary
         specs = self.getChrSpecsName ()
         summaryItems = [
             ("{value}",[self.nameSubtext]),
+            ("<span style=\"color:#9d9d9d\">Talent</span>", [self.getTalent()]),
             ("{value}",[" / ".join(self.getPowers())]),  
             ("{value}",[self.getCastTime(formatType="short", zero="Instant")]), 
             ("{value} cooldown",[self.getCooldown(formatType="short")]), 
@@ -677,7 +731,7 @@ class Spell (AbstractModel):
             ("Requires {value}",[self.getChrClassName(), ", ".join(specs)]), 
             ("Requires level {value}",[self.getCurrentLevel()]), 
         ]
-
+        
         lines += '<table width="100%">'
         for item in summaryItems:
             k, v = item
@@ -766,14 +820,13 @@ def loadManySpells (indices):
     spells = Spell.Many(indices)
     SpellName.Many(indices)
     miscs = SpellMisc.Many(indices, field="id_parent")
-    ManifestInterfaceData.Many([x.spellIconFileDataID for x in miscs]) 
+    ManifestInterfaceData.Many([x.spellIconFileDataID for x in miscs])
     return spells
 
 preload = (
-    ChrSpecialization, 
-    ChrClasses, 
     CreatureType,
     Difficulty, 
+    Talent,
     PowerType, 
     SpellDuration, 
     SpellRadius, 

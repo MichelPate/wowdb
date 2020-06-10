@@ -41,27 +41,46 @@ class MetaModelIndexing (type):
         else :
             s = super()
             instance = s.__call__(*args, **kwargs)
+            # print (args, kwargs, instance._cache)
             cls._REFERENCES[idx] = instance
-            if parentField : 
+            if parentField: 
                 cls._REFRENCES_PARENT[instance._cache[parentField]].append(instance)
             return instance
 
     def _getIndexFromArgs (cls, *args):
         field = cls.TABLE.get("id_field", "id")
-        if isinstance(args[0], int) :
+        if args and isinstance(args[0], int) :
             idx = args[0]
-        elif isinstance(args[0], dict) :
+        elif args and isinstance(args[0], dict) :
             idx = args[0].get(field, None)
         else :
             raise AttributeError ("{} only accepts dict or int".format(cls.__name__))
         return idx
 
+    def FindReference (cls, query):
+        return [subCls for subCls in cls._REFERENCES.values() if subCls.match(query)]
+
+    def Find (cls, query, **kwargs):
+        table = cls.TABLE.get("table")
+        parentField = cls.TABLE.get("id_parent_field", False)
+
+        result = DB[table].find(query)
+        instances = [cls.__call__(x, **kwargs) for x in result]
+
+        if parentField :
+            for item in instances :
+                cls._REFRENCES_PARENT[item._cache[parentField]].append(item)
+        return instances
+
     def Many (cls, indices, **kwargs):
         table = cls.TABLE.get("table")
         field = kwargs.pop("field", cls.TABLE.get("id_field"))
         parentField = cls.TABLE.get("id_parent_field", False)
-        query = DB[table].find({field:{"$in":indices}})
-        
+        sortedIndices = sorted(indices)
+        query = DB[table].find({field:{"$in":sortedIndices}})
+        mapping = {q[field]: q for q in query}
+        query=[mapping[i] for i in indices if i in mapping]
+
         instances = [cls.__call__(x, **kwargs) for x in query]
         if parentField :
             for item in instances :
@@ -104,6 +123,7 @@ class AbstractModel (object, metaclass=MetaModelIndexing):
 
     def __init__ (self, data, *args, **kwargs):
         super (AbstractModel, self).__init__()
+        # print (self.__class__.__name__, data, args, kwargs)
         self.parent = kwargs.pop("parent", None)
 
         if isinstance(data, int): 
@@ -126,4 +146,8 @@ class AbstractModel (object, metaclass=MetaModelIndexing):
         if self._cache :
             return True
         return False
+    
+    def match(self, d):
+        return all(True if getattr(self, k)==v else False for k,v in d.items())
+            
  

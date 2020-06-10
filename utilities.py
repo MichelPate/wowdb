@@ -1,10 +1,11 @@
 
 from .manager import ICON_PATH
-from PIL import Image
+from PIL import Image, ImageOps
 from pathlib import Path
 from io import BytesIO
 import base64
 import re
+import os
 
 rgbHex = lambda c:'#{:02x}{:02x}{:02x}'.format( *c )
 chunks = lambda l, n: [l[x: x+n] for x in range(0, len(l), n)]
@@ -16,7 +17,7 @@ def s (**kwargs):
 def enum(*sequential, **named):
     enums = dict(zip(sequential, range(len(sequential))), **named)
     return type('Enum', (), enums)
-    
+
 def toCamelCase (text, separators="_-"):
     cleaned = re.sub('[{}](.)'.format(separators), lambda x: x.group(1).upper(), text)
     return cleaned[0].lower() + cleaned[1:]
@@ -33,14 +34,29 @@ def keysToInt(x):
 def icn (name, ext="png", root = ICON_PATH):
     return str(Path(root, name.lower()).with_suffix(".{}".format(ext)).absolute())
 
-def iconBase64Html (filename, size=35, html=True):
+def iconBase64Html (filename, size=35, **kwargs):
+    isHtml = kwargs.get("html", True)
     icon = icn(filename)
+    if not os.path.exists(icon):
+        icon = icn("inv_misc_questionmark")
     im = Image.open(icon)
+
+    # Crop blizzard framing
+    width, height = im.size 
+    cr = width*0.065
+    left = cr
+    top = cr
+    right = width-cr
+    bottom = width-cr
+    im = im.crop((left, top, right, bottom))
     im.thumbnail((size, size), Image.ANTIALIAS)
+    im = ImageOps.expand(im, border=kwargs.get("borderSize", 1), fill=kwargs.get("borderColor", (0,0,0)))
+
     buffered = BytesIO()
     im.save(buffered, format="PNG")
     img_str = base64.b64encode(buffered.getvalue())
-    return "<img src=\"data:image/png;base64,{}\"/>".format(img_str.decode("utf-8") )
+    
+    return "<img src=\"data:image/png;base64,{}\" />".format(img_str.decode("utf-8") )
 
 # Unit Format - Decorators and Functions
 def formatTime (ms, formatType="long", null=None, zero=None, unit=True):
@@ -109,6 +125,37 @@ def formatAngle (angle, formatType="long", null=None, unit=True):
         if angle == 1 and formatType=="long":
             currentUnit = currentUnit.strip('s')
         return "{distance} {unit}".format(distance=angle, unit=currentUnit)
+
+def formatGold (amount, formatType="short", null=None, unit=True):
+    intervals = {
+        "short":(
+            ('g', 10000),
+            ('s', 100),
+            ('c', 1),
+        ),
+        "long":(
+            ('gold', 10000),
+            ('silver', 100),
+            ('cooper', 1),
+        )
+    }
+
+    if amount :
+        result = []
+        for name, count in intervals[formatType]:
+            value = intFloat(round(amount / count, 3))
+            if value and value >= 1:
+                amount -= value * count
+                if value == 1:
+                    name = name.rstrip('s')
+                if not unit:
+                    name = ""
+                result.append("{}{}".format(value, name))
+                break
+        if not result :
+            return null
+        return ' '.join(result)
+    return null
 
 class FormatOutput:
     def __init__(self, fn, *args, **kwargs):

@@ -5,11 +5,59 @@ import hashlib
 import operator 
 import functools
 from .models.character import ChrSpecialization
+from .models.gametable import SpellScaling
+from .units import ChrUnitBasePoint, ChrUnitSpellPower, ChrUnitAttackPower
 
 def printM(expr, num_digits):
             return expr.xreplace({n.evalf() : round(n, num_digits) for n in expr.atoms(Number)})
 
-class SpellDescriptionParser (object):
+class LuaParser (object):
+    def __init__ (self, text, parent=None, **kwargs):
+        self.setCurrent (text, parent=parent, **kwargs)
+        self.formatType = kwargs.get("formatType", "html")
+
+    def compute (self, text, verbose=True):
+        vbar = Literal("|")
+        eol = LineEnd().suppress()
+
+        # Colors
+        result = text
+        endTag = ((vbar + (Literal("r")|Literal("R"))|eol))
+        parser = (
+            Suppress(vbar + (Literal("c")|Literal("C"))) + 
+            Word(hexnums, exact=8).setResultsName("hex") + 
+            SkipTo(endTag).setResultsName("content") + 
+            Suppress(endTag)
+        ).addParseAction(self.colorize)
+
+        new_result = parser.transformString(result)
+        result = parser.transformString(new_result)
+
+        while(new_result != result):
+            new_result = result
+            result = parser.transformString(new_result)
+        
+        # Normalize line breakers
+        result = result.replace ("|n", "\n")
+        result = result.replace ("\n\n\n", "\n\n").strip("\n")
+
+        if self.formatType == "html" and verbose:
+            result = result.replace("\r\n", "<br>").replace("\n", "<br>")
+
+        return result
+
+    def setCurrent (self, text, parent=None, **kwargs):
+        self.text = text
+        self.parent = parent
+
+    def colorize (self, t):
+        hexRGB = "".join(list(t.hex)[:6])
+        return "<span style=\"color:#{};\">{}</span>".format(hexRGB, t.content)
+
+    def getComputed (self):
+        return self.compute(self.text)
+
+class SpellDescriptionParser (LuaParser):
     OPS_MAPPING = {
                     "!=": operator.ne,
                     "==":operator.eq,
@@ -24,9 +72,8 @@ class SpellDescriptionParser (object):
                     "!": operator.not_,
                 }
     def __init__ (self, text, parent=None, **kwargs):
-        super (SpellDescriptionParser, self).__init__()
-        self.setCurrent (text, parent=parent, **kwargs)
-
+        super (SpellDescriptionParser, self).__init__(text, parent, **kwargs)
+        self.ilevel = kwargs.get("ilevel", None)
         self.staticVariables = {
             'ap':"Attack Power",
             'agi':"Agility",
@@ -53,11 +100,7 @@ class SpellDescriptionParser (object):
             }
 
     def setCurrent (self, text, parent=None, **kwargs):
-        # print ("Parse:", parent.name, parent.id )
-        self.text = text
-        self.parent = parent
-        self.formatType = kwargs.get("formatType", "html")
-
+        super (SpellDescriptionParser, self).setCurrent(text, parent, **kwargs)
         self.descriptionVariables = None
         var = self.parent.getDescriptionVariables()
         if var:
@@ -89,6 +132,7 @@ class SpellDescriptionParser (object):
         return abs(a)
 
     def compute (self, text, verbose=True):
+        
         # Literals
         dollar = Literal('$')
         amper = Literal('&')
@@ -108,7 +152,6 @@ class SpellDescriptionParser (object):
         gt = Literal(">")
         eq = Literal("=")
         deq = Literal("==")
-        eol = LineEnd().suppress()
 
         # Reusables
         spellId =  Word(nums, min=2, max=6).addParseAction(tokenMap(int)).setResultsName("spellId")
@@ -196,22 +239,6 @@ class SpellDescriptionParser (object):
             steps.append(parser.transformString(steps[-1]))
         result = steps[-1]
     
-        # Colors
-        endTag = ((vbar + (Literal("r")|Literal("R"))|eol))
-        parser = (
-            Suppress(vbar + (Literal("c")|Literal("C"))) + 
-            Word(hexnums, exact=8).setResultsName("hex") + 
-            SkipTo(endTag).setResultsName("content") + 
-            Suppress(endTag)
-        ).addParseAction(self.colorize)
-
-        new_result = parser.transformString(result)
-        result = parser.transformString(new_result)
-
-        while(new_result != result):
-            new_result = result
-            result = parser.transformString(new_result)
-
         # Replace each Sha1 Hash placeholder by refering value
         if verbose :
             for k, v in self.variables.items():
@@ -222,13 +249,7 @@ class SpellDescriptionParser (object):
         for bef, aft in displayFixes:
             result = result.replace(bef, aft)
 
-        # Normalize line breakers
-        result = result.replace ("\n\n\n", "\n\n").strip("\n")
-
-        if self.formatType == "html" and verbose:
-            result = result.replace("\r\n", "<br>").replace("\n", "<br>")
-
-        return result
+        return super (SpellDescriptionParser, self).compute(result, verbose)
     
     def setIcons (self, t):
         if t.path:
@@ -269,14 +290,10 @@ class SpellDescriptionParser (object):
     def getComputed (self):
         if self.descriptionVariables:
             self.computeVariables(self.descriptionVariables)
-        return self.compute(self.text)
+        return super (SpellDescriptionParser, self).getComputed()
 
     def colorLua(self, color, content):
         return "|c{}{}|r".format(color, content)
-
-    def colorize (self, t):
-        hexRGB = "".join(list(t.hex)[:6])
-        return "<span style=\"color:#{};\">{}</span>".format(hexRGB, t.content)
 
     def registerVariable (self, t):
         # SHA1 Hash, only 8char should be enough
@@ -293,6 +310,7 @@ class SpellDescriptionParser (object):
         result = ""
         if t.spellId :
             spell = self.parent.__class__(t.spellId)
+            spell.setItemLevel (self.ilevel)
             if spell.exists():
                 current = spell
 
@@ -321,9 +339,29 @@ class SpellDescriptionParser (object):
             elif t.var in ["clamp", "min", "max", "lt", "lte", "gt", "gte", "abs"]:
                 result = "self.{}".format(t.var)
 
+            elif t.var in ["ec", "eci"]:
+                if t.var == "ec":
+                    from .models.spellItemEnchantment import SpellItemEnchantment
+                    effects = current.getCurrentEffects()
+                    if effects :
+                        enchant = SpellItemEnchantment(effects[0].effectMiscValue[1])
+                        spellScaling = SpellScaling[enchant.maxLevel]
+                        scalingBase = spellScaling.getTypeValue(enchant.scalingClass)
+                        v = scalingBase * enchant.effectScalingPoints[1]
+                        result = int(round(v))
+        
+            elif t.var in ["u", "n", "h"]:
+                auraOptions = current.getCurrentAuraOptions()
+                if auraOptions:
+                    if t.var =="u":
+                        result = auraOptions.cumulativeAura
+                    elif t.var =="n":
+                        result = auraOptions.procCharges
+                    elif t.var =="h":
+                        result = auraOptions.procChance
+                        
             elif isinstance (t.effectId, int) and t.effectId>=0 :
                 effects = current.effects()
-                
                 if len (effects) < t.effectId and effects :
                     effect = effects[-1]
                 else :
@@ -335,10 +373,8 @@ class SpellDescriptionParser (object):
                 elif t.var in ["s", "m", "w", "sw", "o", "bc"] :
     
                     value, unit = effect.getRelatedValue() or (0, int)
-                    isBasePoint = isinstance(unit, (float, int))
-
-                    if not isBasePoint:
-                        value = value*100
+                    if isinstance(unit, (ChrUnitAttackPower, ChrUnitSpellPower)) :
+                        value *= 100
 
                     if t.var == "o":
                         duration = current.getDuration(formatType=None)
@@ -349,7 +385,8 @@ class SpellDescriptionParser (object):
                         value*=durationMod 
 
                     value = intFloat(round(value,4))
-                    if isBasePoint:
+
+                    if unit in (float, int) or isinstance(unit, ChrUnitBasePoint):
                         result = value
                     else :
                         var = self.registerVariable(unit)
@@ -365,16 +402,6 @@ class SpellDescriptionParser (object):
                     result = effect.effectChainTargets
                 elif t.var == "a":
                     result = effect.getRadius(formatType=None)
-
-            elif t.var in ["u", "n", "h"]:
-                auraOptions = current.getCurrentAuraOptions()
-                if auraOptions:
-                    if t.var =="u":
-                        result = auraOptions.cumulativeAura
-                    elif t.var =="n":
-                        result = auraOptions.procCharges
-                    elif t.var =="h":
-                        result = auraOptions.procChance
 
             elif t.var == "d":
                 result = current.getDuration(formatType = "short")
@@ -468,6 +495,7 @@ class SpellDescriptionParser (object):
                 elif v.var:
                     if v.spellId :
                         spell = self.parent.__class__(v.spellId)
+                        spell.setItemLevel (self.ilevel)
                         if spell.exists():
                             current = spell
                         else :
@@ -536,3 +564,28 @@ class SpellDescriptionParser (object):
         if not verbose :
             result = result.replace("\n", "")
         return result
+
+class EnchantmentDescriptionParser(SpellDescriptionParser):
+    def __init__ (self, text, parent=None):
+        super (EnchantmentDescriptionParser, self).__init__ (text, parent)
+    
+    def setReferences (self, t):
+        current = self.parent
+        result = ""
+        if t.var :
+            t.var = t.var.lower()
+            if isinstance (t.effectId, int) and t.effectId>=0 :
+                if t.var == "k" :
+                    spellScaling = SpellScaling[current.maxLevel]
+                    scalingBase = spellScaling.getTypeValue(current.scalingClass)
+                    v = scalingBase * current.effectScalingPoints[1]
+                    result = int(round(v))
+            
+        return str(result)
+    
+    def setCurrent (self, text, parent=None, **kwargs):
+        self.text = text
+        self.parent = parent
+        self.descriptionVariables = None
+        self.variables = {}
+        self.descVariables = {}
