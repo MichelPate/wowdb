@@ -18,5 +18,6 @@ class ItemEffect (AbstractModel):
     
     def getMount(self):
         spell = self.getSpell()
-        mount = next(iter(Mount.Find({"SourceSpellID":spell.id})), None)
-        return mount
+        if spell.exists():
+            mount = next(iter(Mount.Find({"SourceSpellID":spell.id})), None)
+            return mount

@@ -1,4 +1,4 @@
-from ..manager import DB
+from ..manager import DB, STATICDB
 from ..utilities import toCamelCase
 from collections import defaultdict
 import re
@@ -37,7 +37,10 @@ class MetaModelIndexing (type):
         parentField = cls.TABLE.get("id_parent_field", False)
 
         if idx in cls._REFERENCES :
-            return cls._REFERENCES[idx]
+            # return cls._REFERENCES[idx]
+            s = super()
+            instance = s.__call__(cls._REFERENCES[idx]._cache, **kwargs)
+            return instance
         else :
             s = super()
             instance = s.__call__(*args, **kwargs)
@@ -64,7 +67,7 @@ class MetaModelIndexing (type):
         table = cls.TABLE.get("table")
         parentField = cls.TABLE.get("id_parent_field", False)
 
-        result = DB[table].find(query)
+        result = cls.DATABASE[table].find(query)
         instances = [cls.__call__(x, **kwargs) for x in result]
 
         if parentField :
@@ -77,7 +80,7 @@ class MetaModelIndexing (type):
         field = kwargs.pop("field", cls.TABLE.get("id_field"))
         parentField = cls.TABLE.get("id_parent_field", False)
         sortedIndices = sorted(indices)
-        query = DB[table].find({field:{"$in":sortedIndices}})
+        query = cls.DATABASE[table].find({field:{"$in":sortedIndices}})
         mapping = {q[field]: q for q in query}
         query=[mapping[i] for i in indices if i in mapping]
 
@@ -89,7 +92,7 @@ class MetaModelIndexing (type):
     
     def All (cls,**kwargs):
         table = cls.TABLE.get("table")
-        query = DB[table].find()
+        query = cls.DATABASE[table].find()
         return [cls.__call__(x, **kwargs) for x in query]
     
 
@@ -104,7 +107,7 @@ class MetaModelIndexing (type):
             instances = cls._REFRENCES_PARENT[idx]
         elif parentField:
             s = super()
-            query = DB[table].find({parentField: idx})
+            query = cls.DATABASE[table].find({parentField: idx})
             instances = [s.__call__(x, **kwargs) for x in query]
             cls._REFRENCES_PARENT[idx] += instances
         
@@ -120,7 +123,7 @@ class AbstractModel (object, metaclass=MetaModelIndexing):
     EXCLUDE_FIELDS = ["_id"]
     BLACKLIST_WORDS = ["_lang"]
     TABLE = {}
-
+    DATABASE = DB
     def __init__ (self, data, *args, **kwargs):
         super (AbstractModel, self).__init__()
         # print (self.__class__.__name__, data, args, kwargs)
@@ -130,7 +133,7 @@ class AbstractModel (object, metaclass=MetaModelIndexing):
             table = self.TABLE.get("table", False)
             field = self.TABLE.get("id_field", False)
             if table and field:
-                self._cache = DB[table].find_one({field: data})
+                self._cache = self.DATABASE[table].find_one({field: data})
         elif isinstance(data, dict):
             self._cache = data
         properties = {}
@@ -150,4 +153,7 @@ class AbstractModel (object, metaclass=MetaModelIndexing):
     def match(self, d):
         return all(True if getattr(self, k)==v else False for k,v in d.items())
             
- 
+class GameModel (AbstractModel):
+    DATABASE = STATICDB
+    def __init__ (self, data, *args, **kwargs):
+        super (GameModel, self).__init__(data, *args, **kwargs)

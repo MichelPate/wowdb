@@ -6,6 +6,7 @@ import operator
 import functools
 from .models.character import ChrSpecialization
 from .models.gametable import SpellScaling
+from .models.misc import Difficulty
 from .units import ChrUnitBasePoint, ChrUnitSpellPower, ChrUnitAttackPower
 
 def printM(expr, num_digits):
@@ -42,6 +43,7 @@ class LuaParser (object):
         result = result.replace ("\n\n\n", "\n\n").strip("\n")
 
         if self.formatType == "html" and verbose:
+            result = result.replace ("$bullet;", "&bull; ")
             result = result.replace("\r\n", "<br>").replace("\n", "<br>")
 
         return result
@@ -76,6 +78,7 @@ class SpellDescriptionParser (LuaParser):
         self.ilevel = kwargs.get("ilevel", None)
         self.staticVariables = {
             'ap':"Attack Power",
+            'pri':"Primary Stat",
             'agi':"Agility",
             'oap':"Off-Hand Attack Power", 
             'j1g':"J1G", # What's this ?
@@ -85,9 +88,10 @@ class SpellDescriptionParser (LuaParser):
             'owb':"Off-Hand Damage", 
             'ows':"Off-Hand Speed", 
             'pl': "Player Level",
-            'rap':"Raw Attack Power", 
+            'rap':"Ranged Attack Power", 
             'rws':"Raw W Spell", 
             'sp':"Spell Power", 
+            'sph':"Spell Power",
             'spfr':"Spell Power Frost", 
             'sph':"Spell Power Holy", 
             'spn':"Spell Power Nature",
@@ -306,6 +310,7 @@ class SpellDescriptionParser (LuaParser):
             return "({})".format(self.descVariables.get(t.name, None))
 
     def setReferences (self, t):
+
         current = self.parent
         result = ""
         if t.spellId :
@@ -359,8 +364,10 @@ class SpellDescriptionParser (LuaParser):
                         result = auraOptions.procCharges
                     elif t.var =="h":
                         result = auraOptions.procChance
-                        
-            elif isinstance (t.effectId, int) and t.effectId>=0 :
+
+            elif  t.var in ["b", "i", "c", "s", "m", "w", "sw", "o", "bc"] :        
+                t.effectId = t.effectId or 1
+
                 effects = current.effects()
                 if len (effects) < t.effectId and effects :
                     effect = effects[-1]
@@ -371,7 +378,6 @@ class SpellDescriptionParser (LuaParser):
                     return intFloat(round(effect.effectPointsPerResource,4))
 
                 elif t.var in ["s", "m", "w", "sw", "o", "bc"] :
-    
                     value, unit = effect.getRelatedValue() or (0, int)
                     if isinstance(unit, (ChrUnitAttackPower, ChrUnitSpellPower)) :
                         value *= 100
@@ -404,7 +410,9 @@ class SpellDescriptionParser (LuaParser):
                     result = effect.getRadius(formatType=None)
 
             elif t.var == "d":
-                result = current.getDuration(formatType = "short")
+                duration = current.getDuration(formatType = "short")
+                if duration :
+                    result = duration
 
             elif t.var == "i":
                 result = current.getMaxTargets()
@@ -426,10 +434,13 @@ class SpellDescriptionParser (LuaParser):
                 contentVars = t.content
                 for k,v in self.variables.items():
                     contentVars = contentVars.replace(k, str(v))
+                if t.mod == 1:
+                    modifier = 1 #did they change this from 10 to 1 ?
                 if t.mod == 1 or t.mod == 2:
                     if "%" in contentVars :
-                        # {}.x is equivalent to *0.08 apparently for % AP/SP
-                        modifier = 0.08
+                        if t.mod == 2:
+                            # {}.x is equivalent to *0.08 apparently for % AP/SP
+                            modifier = 0.08
 
             # Remove blacklist words from expression
             blacklist=[" sec", " secs"]
@@ -526,10 +537,12 @@ class SpellDescriptionParser (LuaParser):
                                 header =  specStr
 
                     elif v.var == "c" and v.id:
-                        clsId = self.parent.getChrClass().id
-                        chrSpec = [x for x in ChrSpecialization._REFERENCES.values() if x.classID == clsId and x.orderIndex == v.id-1]
-                        if chrSpec :
-                            header = chrSpec[0].name
+                        chrCls = self.parent.getChrClass()
+                        if chrCls and chrCls.exists():
+                            clsId = chrCls.id
+                            chrSpec = [x for x in ChrSpecialization._REFERENCES.values() if x.classID == clsId and x.orderIndex == v.id-1]
+                            if chrSpec :
+                                header = chrSpec[0].name
                     
                     compare.append(bool(header))
 
@@ -589,3 +602,59 @@ class EnchantmentDescriptionParser(SpellDescriptionParser):
         self.descriptionVariables = None
         self.variables = {}
         self.descVariables = {}
+
+
+class EncounterSectionParser(LuaParser):
+    def __init__ (self, text, parent=None):
+        super (EncounterSectionParser, self).__init__ (text, parent)
+    
+    def compute (self, text, verbose=True):
+        
+        vbar = Literal("|")
+        hlinkCap = vbar + Literal("H")
+        hlink = vbar + Literal("h")
+        dollar = Literal('$')
+        lbrack = Literal("[")
+        rbrack = Literal("]")
+        exclamationMark = Literal("!")
+
+        numberInt =Word(nums).addParseAction(tokenMap(int))
+        #Condition
+        conditionParser = (
+            dollar + 
+            lbrack + 
+            exclamationMark +
+            OneOrMore(
+                numberInt + 
+                Optional(Literal(",").suppress())
+                ).setResultsName("difficulties") +
+            SkipTo(dollar).setResultsName("text") + 
+            Suppress(dollar + rbrack)
+        ).addParseAction(self.setCondition)
+
+        # Hyperlink
+        hyperlinkParser = (
+            Suppress(hlinkCap) + 
+            SkipTo(hlink).setResultsName("link") + 
+            Suppress(hlink) + 
+            SkipTo(hlink).setResultsName("anchor") + 
+            Suppress(hlink)
+            ).addParseAction(self.setHyperlink)
+       
+        # Parsing layer by layer
+        parsingOrder = [conditionParser, hyperlinkParser]
+        steps = [text]
+        for parser in parsingOrder :
+            steps.append(parser.transformString(steps[-1]))
+        result = steps[-1]
+        return super (EncounterSectionParser, self).compute(result, verbose)
+    
+    def setHyperlink(self, t):
+        linkType, linkId = t.link.split(":")
+        if linkType == "spell":
+            from .models.spell import Spell
+            return Spell(int(linkId)).getShortText()
+    
+    def setCondition(self, t):
+        difficulties = ", ".join([Difficulty(x).name for x in t.difficulties])
+        return "{difficulties}:\n{text}".format(difficulties=difficulties, text=t.text)

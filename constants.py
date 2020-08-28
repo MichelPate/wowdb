@@ -235,8 +235,8 @@ CHR_STATS =  [
     'Critical Strike (Spell)',
     'Hit Avoidance (Melee)',
     'Hit Avoidance (Ranged)',
-    'Hit Avoidance (Spell)',
-    'Critical Strike Avoidance (Melee)',
+    'Random Stat 1', #'Hit Avoidance (Spell)',
+    'Random Stat 2', #'Critical Strike Avoidance (Melee)',
     'Critical Strike Avoidance (Ranged)',
     'Critical Strike Avoidance (Spell)',
     'Haste (Melee)',
@@ -2269,7 +2269,8 @@ EFFECT_MISC_TYPES = {
         1: 'Mod Attacker Ranged Crit Chance - %'
     },
     189: {
-        1: 'Mod Rating'
+        1: 'Mod Rating',
+        33554432: 'Mod Rating (Mastery)',
     },
     190: {
         1: 'Mod Reputation Gained %'

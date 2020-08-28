@@ -1,6 +1,6 @@
 
 from .manager import ICON_PATH
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw, ImageFont
 from pathlib import Path
 from io import BytesIO
 import base64
@@ -32,10 +32,15 @@ def keysToInt(x):
     return x 
 
 def icn (name, ext="png", root = ICON_PATH):
-    return str(Path(root, name.lower()).with_suffix(".{}".format(ext)).absolute())
+    pathFn = lambda name, ext, root : str(Path(root, name.lower()).with_suffix(".{}".format(ext)).absolute())
+    currentPath = pathFn (name, ext, root) 
+    if os.path.exists(currentPath) :
+        return currentPath
+    return pathFn ("Inv_misc_questionmark", ext, root)
 
 def iconBase64Html (filename, size=35, **kwargs):
     isHtml = kwargs.get("html", True)
+    
     icon = icn(filename)
     if not os.path.exists(icon):
         icon = icn("inv_misc_questionmark")
@@ -52,6 +57,18 @@ def iconBase64Html (filename, size=35, **kwargs):
     im.thumbnail((size, size), Image.ANTIALIAS)
     im = ImageOps.expand(im, border=kwargs.get("borderSize", 1), fill=kwargs.get("borderColor", (0,0,0)))
 
+    # text = kwargs.get("text", False)
+    # if text :
+    #     width, height = im.size 
+    #     color = text.get("color", (255,255,255))
+    #     font = text.get("font", "arial.ttf")
+    #     fontSize = text.get("size", 12)
+    #     position = text.get("position", (width*0.4,height*0.4))
+
+    #     draw = ImageDraw.Draw(im)
+    #     fontObj = ImageFont.truetype(font, fontSize)
+    #     draw.text(position,text.get("text", ""),color,font=fontObj)
+
     buffered = BytesIO()
     im.save(buffered, format="PNG")
     img_str = base64.b64encode(buffered.getvalue())
@@ -62,8 +79,8 @@ def iconBase64Html (filename, size=35, **kwargs):
 def formatTime (ms, formatType="long", null=None, zero=None, unit=True):
     intervals = {
         "short":(
-            ('h', 3600000),
-            ('mn', 60000),
+            ('hrs', 3600000),
+            ('min', 60000),
             ('sec', 1000),
             ('ms', 1),
         ),

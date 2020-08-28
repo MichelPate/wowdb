@@ -29,7 +29,7 @@ class SpellScaling (AbstractModel):
         
 
 preload = (
-    CombatRatings,
+    # CombatRatings,
     CombatRatingsMultByILvl,
     StaminaMultByILvl,
     SpellScaling,

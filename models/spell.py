@@ -1,5 +1,6 @@
 from .abstract import AbstractModel
 from .gametable import CombatRatingsMultByILvl
+from .gametable import SpellScaling as TableSpellScaling
 from .misc import PowerType, Difficulty, ManifestInterfaceData, RandPropPoints
 from .character import ChrSpecialization, ChrClasses
 from .creature import CreatureType
@@ -7,7 +8,7 @@ from ..manager import DB
 from ..units import ChrUnitBasePoint, ChrUnitSpellPower, ChrUnitAttackPower
 from ..utilities import chunks, FormatOutput, formatTime, formatDistance, formatAngle, arrayFromB32, intFloat, s 
 from ..parsers import SpellDescriptionParser
-from ..constants import SCHOOL_MASKS, SPELLS_FLAGS, SUBEFFECT_TYPES, EFFECT_TYPES, SUBEFFECT_TYPES, EFFECT_MISC_TYPES, ITEM_DEFAULT_ILVL
+from ..constants import SCHOOL_MASKS, SPELLS_FLAGS, SUBEFFECT_TYPES, EFFECT_TYPES, SUBEFFECT_TYPES, EFFECT_MISC_TYPES, ITEM_DEFAULT_ILVL, SPELL_TARGETS
 
 SPELL_CLASS_MASKS_ALL = {i:list(set([x["SpellClassMask_{}".format(i)] for x in DB["SpellClassOptions"].find({"SpellClassMask_{}".format(i):{'$gt': 0}})])) for i in range (1,5)}
 
@@ -52,7 +53,7 @@ class SpellDispelType (AbstractModel):
         super (SpellDispelType, self).__init__(id, **kwargs)
 
 class SpellCastTimes (AbstractModel):
-    TABLE = {"table":"SpellMisc", "id_field":"id"}
+    TABLE = {"table":"SpellCastTimes", "id_field":"id"}
     def __init__ (self, id, **kwargs):
         super (SpellCastTimes, self).__init__(id, **kwargs)
 
@@ -93,12 +94,13 @@ class SpellMisc (AbstractModel):
         super (SpellMisc, self).__init__(id, **kwargs)
     
     def getIcon (self, size=35,**kwargs):
-        uiData = ManifestInterfaceData(self.spellIconFileDataID)
+        iconId = self.spellIconFileDataID or self.activeIconFileDataID or 134400 #activeIconFileDataID
+        uiData = ManifestInterfaceData(iconId)
         return uiData.getIcon(size, **kwargs)
     
     @FormatOutput(formatTime)
     def getCastTime (self):
-        data = SpellCastTimes[self.castingTimeIndex]
+        data = SpellCastTimes(self.castingTimeIndex)
         if data:
             return data.base
         return None
@@ -305,6 +307,17 @@ class SpellInterrupts (AbstractModel):
     TABLE = {"table":"SpellInterrupts", "id_field":"id", "id_parent_field":"id_parent"}
     def __init__ (self, id, **kwargs):
         super (SpellInterrupts, self).__init__(id, **kwargs)
+    
+    def getInterruptFlags (self):
+        return arrayFromB32(self.interruptFlags)
+    
+    def getChannelInterruptFlags(self):
+        enableIndices = []
+        for idx, n in self.channelInterruptFlags.items():
+            b32 = '{:032b}'.format(n)
+            enableIndices += [((idx-1)*32)+int(i) for i,v in enumerate(reversed(b32)) if v == "1"]
+       
+        return enableIndices
 
 class SpellLevels (AbstractModel):
     TABLE = {"table":"SpellLevels", "id_field":"id", "id_parent_field":"id_parent"}
@@ -319,6 +332,10 @@ class SpellEffect (AbstractModel):
     def getType (self):
         return EFFECT_TYPES.get(self.effect, "Unk #{}".format(self.effect))
 
+    def getImplicitTargets (self):
+        if self.implicitTarget[1] or self.implicitTarget[2] :  
+            return (SPELL_TARGETS[self.implicitTarget[1]], SPELL_TARGETS[self.implicitTarget[2]])
+
     def getSubType (self):
         subEffectName = SUBEFFECT_TYPES.get(self.effectAura, "Unk #{}".format(self.effectAura))
         effectMiscDict = EFFECT_MISC_TYPES.get(self.effectAura, False)
@@ -331,6 +348,11 @@ class SpellEffect (AbstractModel):
             subEffectName = miscText
         return subEffectName
 
+    def getItem (self):
+        if self.effectItemType:
+            from .item import Item
+            return Item (self.effectItemType)
+            
     def getMechanic (self, null=None):
         mechanic = SpellMechanic[self.effectMechanic]
         if mechanic : 
@@ -361,11 +383,14 @@ class SpellEffect (AbstractModel):
 
     def getRelatedValue (self):
         flags = self.parent.getFlags(verbose=False)
-        
-        # Scale with ilevel
-        if 354 in flags :         
-            ilvl = self.parent.ilevel
 
+        # REMOVE THIS ASAP, Make it in a condition when everything else not working
+        from .item import ItemEffect
+        itemFx = next(iter(ItemEffect.Find({"SpellID":self.parent.id})), None)
+
+        # Scale with ilevel
+        if 354 in flags :        
+            ilvl = self.parent.ilevel
             propPoints = RandPropPoints[ilvl]
             crMult = CombatRatingsMultByILvl[ilvl]
             scaling = self.parent.getScaling()
@@ -380,6 +405,11 @@ class SpellEffect (AbstractModel):
                 amount = self.coefficient * propPoints.damageSecondary
             else :
                 amount = self.coefficient * propPoints.epic[1]
+            return (int(round (amount)), int)
+
+        elif itemFx and itemFx.triggerType == 7 and 379 in flags and self.effectAura == 189: # SpellScaling by Item
+            tableSpellScaling = TableSpellScaling(60)
+            amount = self.coefficient * tableSpellScaling.item
             return (int(round (amount)), int)
         else:
             mapCls = {"effectBasePointsF":ChrUnitBasePoint, "bonusCoefficientFromAP":ChrUnitAttackPower, "effectBonusCoefficient":ChrUnitSpellPower}
@@ -538,7 +568,7 @@ class Spell (AbstractModel):
     def getCurrentMisc (self):
         miscs = self.miscs()
         if miscs :
-            return next(iter([x for x in miscs if x.difficultyID == self.getCurrentDifficulty()]), None)
+            return next(iter([x for x in miscs if x.difficultyID == self.getCurrentDifficulty()]), miscs[0])
     
     def getCurrentLevels (self):
         levels = self.levels()
@@ -574,7 +604,7 @@ class Spell (AbstractModel):
     def getCurrentEffects (self):
         effects = self.effects()
         if effects :
-            return [x for x in effects if x.difficultyID == self.getCurrentDifficulty()]
+            return [x for x in effects if x.exists() and x.difficultyID == self.getCurrentDifficulty()]
         return []
 
     def getDescriptionVariables (self):
@@ -598,7 +628,9 @@ class Spell (AbstractModel):
         return self.getCurrentMisc().getDifficulty(*args, **kwargs)
 
     def getIcon (self, *args, **kwargs):
-        return self.getCurrentMisc().getIcon(*args, **kwargs)
+        misc = self.getCurrentMisc()
+        if misc :
+            return misc.getIcon(*args, **kwargs)
     
     def getDuration (self, *args, **kwargs):
         return self.getCurrentMisc().getDuration(*args, **kwargs)
@@ -616,7 +648,10 @@ class Spell (AbstractModel):
         return self.getCurrentMisc().getCastTime(*args, **kwargs)
     
     def getFlags (self, *args, **kwargs):
-        return self.getCurrentMisc().getFlags(*args, **kwargs)
+        misc = self.getCurrentMisc()
+        if misc :
+            return misc.getFlags(*args, **kwargs)
+        return []
 
     def getMaxCharges(self, null=None):
         current = self.getCurrentCategories()
@@ -814,6 +849,9 @@ class Spell (AbstractModel):
                 lines += "<li {style}>&bull; {flag}</li>".format(flag=flag, style= s(size=11))
             lines += '</ul>'
 
+        #ID 
+        lines += '<br>'
+        lines += '<p {style}>ID: {}</p>'.format(self.id, style= s(size=11))
         return lines
 
 def loadManySpells (indices):

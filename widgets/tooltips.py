@@ -31,6 +31,5 @@ class TooltipDialog (QtWidgets.QDialog):
         self.move(QtGui.QCursor.pos())
         super(TooltipDialog, self).showEvent(event)
         if not self.text:
-            self.text = self.obj.getTooltipText(displayLevel=self.kwargs.get("displayLevel", 2))
-        
+            self.text = self.obj.getTooltipText(displayLevel=self.kwargs.get("displayLevel", 1))
         self.label.setText (self.text)

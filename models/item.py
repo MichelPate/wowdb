@@ -1,14 +1,23 @@
 from .abstract import AbstractModel
+from .character import ChrClasses
 from .misc import ManifestInterfaceData, RandPropPoints
 from .itemEffect import ItemEffect
 from .spellItemEnchantment import SpellItemEnchantment
-from .skill import SkillLine
-from .gametable import CombatRatings, CombatRatingsMultByILvl, StaminaMultByILvl
+from .gametable import CombatRatingsMultByILvl, StaminaMultByILvl
 from ..constants import CHR_STATS, ITEM_INVTYPE, INVENTORY_TYPES, CHR_PRIMARY_STATS, ITEM_MATERIAL_TYPES, ITEM_QUALITY_COLORS, ITEM_FLAGS
 from ..utilities import iconBase64Html, FormatOutput, formatGold, arrayFromB32, s
 import math
 import itertools
 import operator
+
+
+def loadManyItems (data):
+    indices = [x["id"] for x in data]
+    items = Item.Many(indices)
+    sparses = ItemSparse.Many(indices)
+    modifiedAppearance = ItemModifiedAppearance.Many(indices, field="id_parent")
+    ManifestInterfaceData.Many([x.itemAppearanceID for x in modifiedAppearance])
+    return [Item(x.pop("id"), **x) for x in data]
 
 class Item (AbstractModel):
     TABLE = {"table":"Item", "id_field":"id"}
@@ -52,24 +61,33 @@ class Item (AbstractModel):
         if sparse :
             # All ItemArmorQuality entries are the same
             # Let's just always use the same one to avoid queries
-            armorQuality = ItemArmorQuality(1)
+            
             quality = sparse.getQuality()
-            armorQualityMod = armorQuality.qualitymod[quality]
             ilvl = sparse.getItemLevel()
             subClass = self.getSubclass()
             armorType = subClass.displayName.lower ()
+
+            if armorType == "shield":
+                sparse = self.getSparse()
+                ilvl = sparse.getItemLevel()
+                armorShield = ItemArmorShield[ilvl]
+                armorValue = armorShield.quality[quality]
+                return math.floor(armorValue+0.5)
+            
+            armorQuality = ItemArmorQuality(1)
+            armorQualityMod = armorQuality.qualitymod[quality]
             armorLocation = ArmorLocation[self.inventoryType]
             armorTotal = ItemArmorTotal[ilvl]
 
             if hasattr(armorTotal, armorType) :
                 attrArmorLoc = "{}modifier".format(armorType)
-                invTypMod = getattr(armorLocation, attrArmorLoc)
+                invTypMod = getattr(armorLocation, attrArmorLoc.replace("mail", "chain"))
                 armorValue = getattr(armorTotal, armorType)
-
                 return math.floor(armorValue*armorQualityMod*invTypMod+0.5)
+            
 
     def getBonusList (self):
-        return [ItemBonus(idx) for idx in self.bl]
+        return [ItemBonus[idx] for idx in self.bl]
            
     def getMaterial (self):
         return ITEM_MATERIAL_TYPES.get(self.material, None)
@@ -115,17 +133,19 @@ class Item (AbstractModel):
             return sparse
         else :
             searchName = self.getSearchName()
-            items = ItemSearchName.Find({"Display_lang":searchName.display})
-            for item in items:
-                sparse = item.getSparse()
-                if sparse :
-                    return sparse
+            if searchName.exists():
+                items = ItemSearchName.Find({"Display_lang":searchName.display})
+                for item in items:
+                    sparse = item.getSparse()
+                    if sparse :
+                        return sparse
     
     def getIcon (self, size=35, **kwargs):
         sparse = self.getSparse()
-        qualityColor = sparse.getQualityColor()
-        d = {"borderColor":qualityColor}
-        d.update(kwargs)
+        d = kwargs
+        if sparse:
+            qualityColor = sparse.getQualityColor()
+            d.update({"borderColor":qualityColor})
         if self.iconFileDataID != 0 :
             uiData = ManifestInterfaceData(self.iconFileDataID)
             return uiData.getIcon(size, **d)
@@ -140,6 +160,29 @@ class Item (AbstractModel):
     def getSubclass (self):
         return next(iter(ItemSubClass.FindReference({"classID":self.classID, "subClassID":self.subclassID})), None)
 
+    def getWeaponDps (self):
+        if self.classID == 2 :
+            sparse = self.getSparse()
+            ilvl = sparse.getItemLevel()
+            WEAPON_DAMAGE_TYPES = {1:ItemDamageTwoHand, 2:ItemDamageTwoHandCaster ,3:ItemDamageOneHand, 8:ItemDamageOneHand}
+            # Change sheatheType to SubClass
+            damageType = WEAPON_DAMAGE_TYPES[sparse.sheatheType][ilvl]
+            return round(damageType.quality[sparse.overallQualityID+1], 1)
+    
+    def getWeaponSpeed(self):
+        if self.classID == 2 :
+            sparse = self.getSparse()
+            return sparse.itemDelay * 0.001
+    
+    def getWeaponDamageRange (self):
+        if self.classID == 2 :
+            sparse = self.getSparse()
+            dps = self.getWeaponDps()
+            speed = self.getWeaponSpeed()
+            minDmg = math.floor( dps * speed * ( 1 - sparse.dmgVariance * 0.5 ) ) 
+            maxDmg = math.ceil( dps * speed * ( 1 + sparse.dmgVariance * 0.5 ) )
+            return (minDmg, maxDmg)
+
     def getTooltipText (self, displayLevel=1):
         lines = ""
         BONDING_TYPES = ["No bounds", "Binds when picked up", "Binds when equipped", "Binds when used", "Quest item", "Quest Item1"]
@@ -150,7 +193,7 @@ class Item (AbstractModel):
         ilvl = sparse.getItemLevel()
         nameDesc = sparse.getNameDescription()
         flags = sparse.getFlags()
-        mount = next(filter(None, [x.getMount() for x in effects]), False)
+        mount = next(filter(None, [x.getMount() for x in effects if x.exists()]), False)
 
         # Header
         lines += '<table width="100%">'
@@ -194,13 +237,9 @@ class Item (AbstractModel):
 
             # Weapon
             if self.classID == 2 : 
-                WEAPON_DAMAGE_TYPES = {1:ItemDamageTwoHand, 2:ItemDamageTwoHandCaster ,3:ItemDamageOneHand, 8:ItemDamageOneHand}
-                damageType = WEAPON_DAMAGE_TYPES[sparse.sheatheType](ilvl)
-
-                dps = round(damageType.quality[sparse.overallQualityID+1], 1)
-                speed = sparse.itemDelay * 0.001
-                minDmg = math.floor( dps * speed * ( 1 - sparse.dmgVariance * 0.5 ) ) 
-                maxDmg = math.ceil( dps * speed * ( 1 + sparse.dmgVariance * 0.5 ) ) 
+                dps = self.getWeaponDps()
+                speed = self.getWeaponSpeed()
+                minDmg, maxDmg = self.getWeaponDamageRange()
 
                 lines += '<tr>'
                 lines += '<td {style}>{minDmg} - {maxDmg} Damage</td>'.format(minDmg=minDmg,maxDmg=maxDmg, style=s(size=12) )
@@ -226,6 +265,11 @@ class Item (AbstractModel):
                 lines += '<td {style}>{}</td>'.format("+{} {}".format(stat["amount"], stat["name"]) , style=s(size=12, color=statColor) )
                 lines += '</tr>'
             
+            if sparse.isIndestructible() :
+                lines += '<tr>'
+                lines += '<td {style}>Indestructible</td>'.format(style=s(size=12, color=statColor) )
+                lines += '</tr>'
+
             if self.enchant :
                 lines += '<tr>'
                 lines += '<td {style}>Enchanted: {enchantment}</td>'.format(enchantment = self.enchant.getName() , style=s(size=12, color=(30,255,0)) )
@@ -251,8 +295,16 @@ class Item (AbstractModel):
                     lines += '<tr>'
                     lines += '<td {style}>{}</td>'.format(socket, style=s(size=12) )
                     lines += '</tr>'
+            
+            if sparse.socketMatchEnchantmentID :
+                socketBonus = SpellItemEnchantment (sparse.socketMatchEnchantmentID)
+                lines += '<tr>'
+                lines += '<td {style}>{}</td>'.format("{text}".format(text=socketBonus.getName()), style=s(size=12, color=(150,150,150)) )
+                lines += '</tr>'
+
             lines += '</table>'
 
+        
         triggersTypes = ["Use", "Equip", "UNK2", "UNK3", "UNK4", "UNK5", "Use"]
         skill = sparse.getSkill()
         lines += '<table width="100%">'
@@ -262,7 +314,7 @@ class Item (AbstractModel):
 
             spellEffect = spell.getCurrentEffects()[0]
             spellEffectItemID = spellEffect.effectItemType
-            if spellEffectItemID : 
+            if spellEffectItemID and spellEffectItemID != self.id:
                 spellEffectItem = Item(spellEffectItemID)
                 lines += "<br>"
                 lines += spellEffectItem.getTooltipText()
@@ -292,6 +344,12 @@ class Item (AbstractModel):
             lines += '<tr>'
             lines += '<td {style}>Requires Level {level}</td>'.format(level=sparse.requiredLevel, style=s(size=12))
             lines += '</tr>'
+        if sparse.allowableClass:
+            chrClasse = ChrClasses(sparse.allowableClass)
+            if chrClasse.exists() :
+                lines += '<tr>'
+                lines += '<td {style}>Requires {chrClass}</td>'.format(chrClass=chrClasse.name, style=s(size=12))
+                lines += '</tr>'
         if 3 in flags :
             lines += '<tr>'
             lines += '<td {style}>&lt;Right Click to Open&gt;</td>'.format(style=s(size=12, color=(30,255,0)))
@@ -326,6 +384,10 @@ class Item (AbstractModel):
             for flag in flags:
                 lines += "<li {style}>&bull; {flag}</li>".format(flag=ITEM_FLAGS.get(flag, "UNK FLAG {}".format(flag)), style= s(size=11))
             lines += '</ul>'
+
+        #ID 
+        lines += '<br>'
+        lines += '<p {style}>ID: {}</p>'.format(self.id, style= s(size=11))
         return lines
 
 class ItemSearchName (AbstractModel):
@@ -341,7 +403,7 @@ class ItemSearchName (AbstractModel):
             if bonus.exists() and bonus.type == 4:
                 nameDescId = bonus.value[1]
         if nameDescId :
-            return ItemNameDescription(nameDescId)
+            return ItemNameDescription[nameDescId]
 
     def getBonusList (self):
         return sum([ItemBonus.FromParent(idx, self) for idx in self.bl], [])
@@ -385,10 +447,15 @@ class ItemSparse (ItemSearchName):
     def getMaterial (self):
         return ITEM_MATERIAL_TYPES.get(self.material, None)
 
-    
+    def getAllowableClass (self):
+        return arrayFromB32(self.allowableClass)
+
+    def getInventoryTypeName (self):
+        return INVENTORY_TYPES[self.inventoryType]
 
     def getSkill (self):
         if self.requiredSkill :
+            from .skill import SkillLine
             return SkillLine(self.requiredSkill)
 
     def getSockets (self, size=15, html=True):
@@ -411,6 +478,10 @@ class ItemSparse (ItemSearchName):
                 result.append( '{icon} <span style="color:#9d9d9d">{name} Socket</span>'.format(icon=icon, name=socketName.title()))
         return result
 
+    def isIndestructible (self):
+        bl = self.getBonusList()
+        return any( bonus for bonus in bl if bonus.type==2 and bonus.value[1] == 64 )
+
     @FormatOutput(formatGold)
     def getSellPrice (self):
         return self.sellPrice
@@ -427,7 +498,7 @@ class ItemSparse (ItemSearchName):
         stats = [{"name":CHR_STATS[k], "id":k, "alloc":v} for k, v in zip(self.statModifierBonusStat.values(), self.statPercentEditor.values()) if k!=-1]
 
         # Tertiary Stats
-        excludeTertiaries = (22,23) 
+        excludeTertiaries = (22,23, 64) 
         stats += [{"name":CHR_STATS[bonus.value[1]], "id":bonus.value[1], "alloc":bonus.value[2]} for bonus in bl if bonus.type==2 and bonus.value[1] not in excludeTertiaries]
 
         if self.inventoryType in [11,2] : # Neck and Rings
@@ -443,7 +514,7 @@ class ItemSparse (ItemSearchName):
                 amount *= staminaPenalty
             elif stat["id"] not in CHR_PRIMARY_STATS :
                 amount *= crPenalty
-            amount=amount*0.0001
+            amount*=0.0001
             stats[i]["amount"] = int(amount)
 
         # Merge same stats
@@ -566,11 +637,11 @@ class GemProperties (AbstractModel):
 
 preload = (
     ArmorLocation,
-    ItemClass, 
+    # ItemClass,
     ItemSubClass, 
     ItemNameDescription,
     ItemBonus,
-    ItemBonusListLevelDelta,
+    # ItemBonusListLevelDelta,
     ItemArmorTotal,
     ItemArmorShield,
     ItemDamageOneHand, 
