@@ -26,6 +26,7 @@ class SpellScaling (AbstractModel):
         attr =  self.TYPE_TBL [abs(v)]
         if hasattr (self, attr):
             return getattr(self,attr)
+        return 0
         
 
 preload = (

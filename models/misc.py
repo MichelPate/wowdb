@@ -35,6 +35,43 @@ class RandPropPoints (AbstractModel):
     def __init__ (self, id, **kwargs):
         super (RandPropPoints, self).__init__(id, **kwargs)
 
+def closest(lst, K): 
+        return lst[min(range(len(lst)), key = lambda i: abs(lst[i]-K))] 
+
+class CurvePoint (AbstractModel):
+    TABLE = {"table":"CurvePoint", "id_field":"id"}
+    def __init__ (self, id, **kwargs):
+        super (CurvePoint, self).__init__(id, **kwargs)
+    
+    @classmethod
+    def getCurve (cls, idx):
+        curveUnsorted = cls.Find({"CurveID":idx})
+        sortedCurve = sorted(curveUnsorted, key=lambda x: x.orderIndex)
+        return sortedCurve
+    
+    @classmethod
+    def getInterpolation (cls, value, curveID=0):
+        curve = cls.getCurve(curveID)
+        d = {}
+        for p in curve :
+            d[int(p.pos[1])]=int(p.pos[2])
+        
+        if value in d.keys():
+            return d[value]
+        else:
+            l = list(d.keys())
+            clo = closest(l, value)
+            idx = l.index(clo)
+            if clo > value:
+                mi, ma = l[idx-1], clo
+            else :
+                mi, ma = clo, l[idx+1]
+            deltaIlvl =  d[ma] - d[mi]
+            deltaLvl =  ma - mi
+            mult = deltaIlvl/deltaLvl
+            deltaDrop = value-mi
+            v = deltaDrop*mult
+            return d[mi]+v
 
 preload = (
     RandPropPoints,

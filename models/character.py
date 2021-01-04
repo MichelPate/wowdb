@@ -9,8 +9,11 @@ class ChrClasses (AbstractModel):
     def __init__ (self, id, **kwargs):
         super (ChrClasses, self).__init__(id, **kwargs)
     
-    def getColor (self):
-        return self.COLORS.get(self.id, None)
+    def getColor (self, **kwargs):
+        color = self.COLORS.get(self.id, None)
+        if kwargs.get("hex", False):
+            return rgbHex(color)
+        return color
     
     def getIcon (self, size=35,**kwargs):
         uiData = ManifestInterfaceData(self.iconFileDataID)
@@ -32,6 +35,11 @@ class ChrSpecialization (AbstractModel):
     
     # def getSpecializationSpells (self):
     #     return SpecializationSpells.FromParent(self.id, parent=self)
+
+class ChrRaces (AbstractModel):
+    TABLE = {"table":"ChrRaces", "id_field":"id"}
+    def __init__ (self, id, **kwargs):
+        super (ChrRaces, self).__init__(id, **kwargs)
 
 class SpecSetMember (AbstractModel):
     TABLE = {"table":"SpecSetMember", "id_field":"id", "id_parent_field":"id_parent"}

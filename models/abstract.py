@@ -151,7 +151,7 @@ class AbstractModel (object, metaclass=MetaModelIndexing):
         return False
     
     def match(self, d):
-        return all(True if getattr(self, k)==v else False for k,v in d.items())
+        return all(True if hasattr(self, k) and getattr(self, k)==v else False for k,v in d.items())
             
 class GameModel (AbstractModel):
     DATABASE = STATICDB

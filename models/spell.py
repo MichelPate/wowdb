@@ -11,6 +11,7 @@ from ..parsers import SpellDescriptionParser
 from ..constants import SCHOOL_MASKS, SPELLS_FLAGS, SUBEFFECT_TYPES, EFFECT_TYPES, SUBEFFECT_TYPES, EFFECT_MISC_TYPES, ITEM_DEFAULT_ILVL, SPELL_TARGETS
 
 SPELL_CLASS_MASKS_ALL = {i:list(set([x["SpellClassMask_{}".format(i)] for x in DB["SpellClassOptions"].find({"SpellClassMask_{}".format(i):{'$gt': 0}})])) for i in range (1,5)}
+SOULBIND_CONDUITS_SPELL_IDS = list(DB["SoulbindConduitRank"].distinct("SpellID"))  
 
 class SpellXDescriptionVariables (AbstractModel):
     TABLE = {"table":"SpellXDescriptionVariables", "id_field":"id"}
@@ -84,7 +85,8 @@ class Talent (AbstractModel):
                 talent = next(iter(cls.FindReference({"specID":specId, "tierID":row, "columnIndex":col})), False)
                 if not talent:
                     talent = next(iter(cls.FindReference({"classID":spec.classID, "specID":0, "tierID":row, "columnIndex":col})), False)
-                talents.append(talent.spellID)
+                if talent :
+                    talents.append(talent.spellID)
         talents = chunks(loadManySpells(talents), 3)
         return talents
 
@@ -729,6 +731,17 @@ class Spell (AbstractModel):
     def isPassive (self):
         return self.getCurrentMisc().isPassive()
 
+    def isSoulbindConduit (self):
+        if self.id in SOULBIND_CONDUITS_SPELL_IDS:
+            return True
+        return False
+    def getSoulbindConduitType(self):
+        from .soulbind import SoulbindConduitRank, SoulbindConduit
+        soulbindConduitRank = next(iter(SoulbindConduitRank.Find({"SpellID":self.id})), False)
+        if soulbindConduitRank :
+            soulbindConduit = SoulbindConduit(soulbindConduitRank._cache["id_parent"])
+            return soulbindConduit.getTypeName()
+
     def getDescriptionSpells (self):
         d = SpellDescriptionParser(self.description, parent=self, ilevel=self.ilevel)
         return d.getRelatedSpells()
@@ -736,7 +749,9 @@ class Spell (AbstractModel):
     def getShortText (self, iconSize = 15):
         return '<span style="text-align: right;">{icon}</span> {name}'.format(icon=self.getIcon(size=iconSize, html=True), name=self.name)
 
-    def getTooltipText(self, displayLevel=1):
+    def getTooltipText(self, displayLevel=1, **kwargs):
+        iconFlag = kwargs.get("icon", True)
+        footer = kwargs.get("footer", True)
         flags = self.getFlags(verbose=False)
         lines = ""
         
@@ -744,7 +759,8 @@ class Spell (AbstractModel):
         lines += '<table width="100%">'
         lines += '<tr>'
         lines += '<td {style}>{name}</td>'.format(name=self.name, style = s(size=14, weight=700))
-        lines += '<td style="text-align: right;">{icon}</td>'.format(icon=self.getIcon(size=35, html=True))
+        if iconFlag:
+            lines += '<td style="text-align: right;">{icon}</td>'.format(icon=self.getIcon(size=35, html=True))
         lines += '</tr>'
         if 354 in flags :
             lines += '<tr>'
@@ -754,6 +770,7 @@ class Spell (AbstractModel):
         
         # Summary
         specs = self.getChrSpecsName ()
+
         summaryItems = [
             ("{value}",[self.nameSubtext]),
             ("<span style=\"color:#9d9d9d\">Talent</span>", [self.getTalent()]),
@@ -766,7 +783,9 @@ class Spell (AbstractModel):
             ("Requires {value}",[self.getChrClassName(), ", ".join(specs)]), 
             ("Requires level {value}",[self.getCurrentLevel()]), 
         ]
-        
+        if self.isSoulbindConduit():
+            summaryItems.append(("{value} Conduit",[self.getSoulbindConduitType()])) 
+
         lines += '<table width="100%">'
         for item in summaryItems:
             k, v = item
@@ -848,10 +867,11 @@ class Spell (AbstractModel):
             for flag in self.getFlags():
                 lines += "<li {style}>&bull; {flag}</li>".format(flag=flag, style= s(size=11))
             lines += '</ul>'
-
-        #ID 
-        lines += '<br>'
-        lines += '<p {style}>ID: {}</p>'.format(self.id, style= s(size=11))
+        
+        if footer :
+            #ID 
+            lines += '<br>'
+            lines += '<p {style}>ID: {}</p>'.format(self.id, style= s(size=11))
         return lines
 
 def loadManySpells (indices):

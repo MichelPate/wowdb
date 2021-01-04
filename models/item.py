@@ -1,38 +1,87 @@
 from .abstract import AbstractModel
 from .character import ChrClasses
-from .misc import ManifestInterfaceData, RandPropPoints
+from .misc import ManifestInterfaceData, RandPropPoints, CurvePoint
 from .itemEffect import ItemEffect
 from .spellItemEnchantment import SpellItemEnchantment
 from .gametable import CombatRatingsMultByILvl, StaminaMultByILvl
 from ..constants import CHR_STATS, ITEM_INVTYPE, INVENTORY_TYPES, CHR_PRIMARY_STATS, ITEM_MATERIAL_TYPES, ITEM_QUALITY_COLORS, ITEM_FLAGS
 from ..utilities import iconBase64Html, FormatOutput, formatGold, arrayFromB32, s
+from ..manager import DB
 import math
 import itertools
 import operator
+from slugify import slugify
 
 
 def loadManyItems (data):
     indices = [x["id"] for x in data]
-    items = Item.Many(indices)
-    sparses = ItemSparse.Many(indices)
+    [ItemSparse(x) for x in DB["ItemSparse"].find({"id":{"$in":indices}})]
     modifiedAppearance = ItemModifiedAppearance.Many(indices, field="id_parent")
     ManifestInterfaceData.Many([x.itemAppearanceID for x in modifiedAppearance])
-    return [Item(x.pop("id"), **x) for x in data]
+    output = [Item(x.pop("id"), **x) for x in data]
+    return output
 
 class Item (AbstractModel):
     TABLE = {"table":"Item", "id_field":"id"}
     def __init__ (self, id, **kwargs):
         super (Item, self).__init__(id, **kwargs)
-        self.bl = kwargs.get ("bl", [])
+        self.bl = kwargs.get ("bonus_id", [])
+        self.dropLevel = kwargs.get ("drop_level", None)
         self.enchant = None
         self.gems = None
+        self.souldbindConduit = None
+        self._sparse = None
         gemsIds = kwargs.get("gems", None)
+        if not gemsIds:
+            gemsIds = kwargs.get("gem_id", None)
         enchantId = kwargs.get("enchant", None)
+        if not enchantId:
+            enchantId = kwargs.get("enchant_id", None)
+        conduit_rank = kwargs.get("conduit_rank", 0)
         if enchantId :
             self.setEnchantment (enchantId)
         if gemsIds :
             self.setGems (gemsIds)
+        if conduit_rank >= 0:
+            self.setSoulbindConduit(conduit_rank)
 
+    def format (self):
+        slots = ["none", "head", "neck", "shoulder", "shirt", "chest", "waist", "legs", "feet", "wrist", "hands", "finger1", "trinket1", "main_hand", "off_hand", "main_hand", "back", "main_hand", "containers", "tabard", "chest", "main_hand", "off_hand", "off_hand", "ammo", "thrown", "main_hand", "quiver", "relic"]
+        sparse = self.getSparse()
+        if sparse :
+            output = ["{slot}={name}".format(slot=slots[sparse.inventoryType], name=slugify(self.name, separator="_", replacements=[["'", ""]], word_boundary=True))]
+            output.append("id={}".format(self.id))
+            if self.bl:
+                output.append("bonus_id=" + "/".join(map(str,self.bl)))
+            if self.enchant :
+                output.append("enchant_id={}".format(self.enchant.id))
+            if self.gems :
+                output.append("gem_id=" + "/".join(map(str,[x.id for x in self.gems])))
+            if self.dropLevel :
+                output.append("drop_level={}".format(self.dropLevel))
+            outputStr = ",".join(output)
+            return outputStr
+
+    def setSoulbindConduit (self, rank):
+        sparse = self.getSparse()
+        if sparse and sparse.isSoulbindConduit():
+            from .soulbind import SoulbindConduit, SoulbindConduitRank, SoulbindConduitItem, SoulbindConduitRankProperties
+            conduitItem = next(iter(SoulbindConduitItem.Find({"ItemID":self.id})), None)
+            if conduitItem :
+                self.soulbindConduitRank = next(iter(SoulbindConduitRank.Find({"id_parent":conduitItem.soulbindConduitID,"Rank":rank})),None)
+                self.soulbindConduit = SoulbindConduit(self.soulbindConduitRank._cache["id_parent"])
+                prop = SoulbindConduitRankProperties(rank)
+                prop = SoulbindConduitRankProperties(rank)
+                sparse.setItemLevel(prop.itemLevel)
+                sparse.setQuality(prop.quality)
+    
+    def getSoulbindConduitRank (self):
+        if self.soulbindConduitRank :
+            return self.soulbindConduitRank
+    
+    def getSoulbindConduit (self):
+        if self.soulbindConduit :
+            return self.soulbindConduit
 
     @property
     def name (self):
@@ -75,7 +124,7 @@ class Item (AbstractModel):
                 return math.floor(armorValue+0.5)
             
             armorQuality = ItemArmorQuality(1)
-            armorQualityMod = armorQuality.qualitymod[quality]
+            armorQualityMod = armorQuality.qualitymod.get(quality, 1)
             armorLocation = ArmorLocation[self.inventoryType]
             armorTotal = ItemArmorTotal[ilvl]
 
@@ -85,10 +134,9 @@ class Item (AbstractModel):
                 armorValue = getattr(armorTotal, armorType)
                 return math.floor(armorValue*armorQualityMod*invTypMod+0.5)
             
-
     def getBonusList (self):
-        return [ItemBonus[idx] for idx in self.bl]
-           
+        return sum([ItemBonus.Find ({"id_parent":bonusID})for bonusID in self.bl], [])
+
     def getMaterial (self):
         return ITEM_MATERIAL_TYPES.get(self.material, None)
 
@@ -113,7 +161,13 @@ class Item (AbstractModel):
         return ItemXBonusTree.FromParent(self.id, parent=self)
     
     def getEffects (self):
-        effects = self.effects()
+        effects = self.effects() or []
+        bl = self.getBonusList()
+        for bonus in bl :
+            if bonus  and bonus.type == 23:
+                itemEffectID = bonus.value[1]
+                itemEffect = ItemEffect(itemEffectID)
+                effects.append (itemEffect)
         if effects : 
             return effects
         return []
@@ -128,8 +182,11 @@ class Item (AbstractModel):
         return ItemSearchName(self.id)
 
     def getSparse (self):
-        sparse = ItemSparse(self.id, bl=self.bl)
+        if self._sparse :
+            return self._sparse
+        sparse = ItemSparse(self.id, bonus_id=self.bl, drop_level=self.dropLevel)
         if sparse.exists():
+            self._sparse = sparse
             return sparse
         else :
             searchName = self.getSearchName()
@@ -138,6 +195,7 @@ class Item (AbstractModel):
                 for item in items:
                     sparse = item.getSparse()
                     if sparse :
+                        self._sparse = sparse
                         return sparse
     
     def getIcon (self, size=35, **kwargs):
@@ -164,10 +222,11 @@ class Item (AbstractModel):
         if self.classID == 2 :
             sparse = self.getSparse()
             ilvl = sparse.getItemLevel()
-            WEAPON_DAMAGE_TYPES = {1:ItemDamageTwoHand, 2:ItemDamageTwoHandCaster ,3:ItemDamageOneHand, 8:ItemDamageOneHand}
+            WEAPON_DAMAGE_TYPES = {1:ItemDamageTwoHand, 2:ItemDamageTwoHandCaster ,3:ItemDamageOneHand, 5:ItemDamageAmmo, 8:ItemDamageOneHand}
             # Change sheatheType to SubClass
-            damageType = WEAPON_DAMAGE_TYPES[sparse.sheatheType][ilvl]
-            return round(damageType.quality[sparse.overallQualityID+1], 1)
+            if sparse.sheatheType :
+                damageType = WEAPON_DAMAGE_TYPES[sparse.sheatheType][ilvl]
+                return round(damageType.quality[sparse.overallQualityID+1], 1)
     
     def getWeaponSpeed(self):
         if self.classID == 2 :
@@ -188,6 +247,7 @@ class Item (AbstractModel):
         BONDING_TYPES = ["No bounds", "Binds when picked up", "Binds when equipped", "Binds when used", "Quest item", "Quest Item1"]
         # Get elements
         sparse = self.getSparse()
+ 
         subClass = self.getSubclass()
         effects = self.getEffects()
         ilvl = sparse.getItemLevel()
@@ -205,9 +265,10 @@ class Item (AbstractModel):
             lines += '<tr>'
             lines += '<td {style}>{nameDesc}</td>'.format(nameDesc = nameDesc.description , style=s(size=12, color=(30,255,0)) )
             lines += '</tr>'
-        lines += '<tr>'
-        lines += '<td {style}>Item Level {ilvl}</td>'.format(ilvl = ilvl , style=s(size=12, color=(255, 209, 0)) )
-        lines += '</tr>'
+        if ilvl :
+            lines += '<tr>'
+            lines += '<td {style}>Item Level {ilvl}</td>'.format(ilvl = ilvl , style=s(size=12, color=(255, 209, 0)) )
+            lines += '</tr>'
         if mount :
             lines += '<tr>'
             lines += '<td {style}>Mount <span style="color:#9d9d9d">(Account-wide)</span></td>'.format(style=s(size=12) )
@@ -305,29 +366,46 @@ class Item (AbstractModel):
             lines += '</table>'
 
         
-        triggersTypes = ["Use", "Equip", "UNK2", "UNK3", "UNK4", "UNK5", "Use"]
-        skill = sparse.getSkill()
+        triggersTypes = ["Use", "Equip", "UNK2", "UNK3", "UNK4", "", "Use"]
         lines += '<table width="100%">'
-        
+        isShadowlandLegendary = sparse.isShadowlandLegendary()
         for effect in effects :
             spell = effect.getSpell()
-
-            spellEffect = spell.getCurrentEffects()[0]
-            spellEffectItemID = spellEffect.effectItemType
-            if spellEffectItemID and spellEffectItemID != self.id:
-                spellEffectItem = Item(spellEffectItemID)
+            if isShadowlandLegendary:
                 lines += "<br>"
-                lines += spellEffectItem.getTooltipText()
-
-            if spell.description and not mount:
-                cd=False
-                triggerType = triggersTypes[effect.triggerType]
-                if effect.triggerType == 0 :
-                    cd = spell.getCooldown(formatType="short")
-                cooldown = " ({} cooldown)".format(cd) if cd else ""
                 lines += '<tr>'
-                lines += '<td {style}>{triggerType}: {description}{cooldown}</td>'.format(triggerType=triggerType,description=spell.getDescription(),cooldown=cooldown, style=s(size=12, color=(30,255,0)) )
+                lines += '<td {style}>Legendary Power</td>'.format(description=spell.getDescription(), style=s(size=12, color=(255, 209, 0)) )
                 lines += '</tr>'
+                lines += '<tr>'
+                lines += '<td {style}>- {name}</td>'.format(name=spell.name, style=s(size=12, color=(255, 255, 255)) )
+                lines += '</tr>'
+                lines += '<tr>'
+                lines += '<td {style}>{description}</td>'.format(description=spell.getDescription(), style=s(size=12, color=(30,255,0)) )
+                lines += '</tr>'
+                lines += "<br>"
+            else :
+                spellEffect = spell.getCurrentEffects()[0]
+                spellEffectItemID = spellEffect.effectItemType
+                if spellEffectItemID and spellEffectItemID != self.id:
+                    spellEffectItem = Item(spellEffectItemID)
+                    lines += "<br>"
+                    lines += spellEffectItem.getTooltipText()
+
+                if spell.description and not mount:
+                    cd=False
+                    triggerType = triggersTypes[effect.triggerType]
+                    if effect.triggerType == 0 :
+                        cd = spell.getCooldown(formatType="short")
+                    cooldown = " ({} cooldown)".format(cd) if cd else ""
+                    lines += '<tr>'
+                    lines += '<td {style}>{triggerType}: {description}{cooldown}</td>'.format(triggerType=triggerType,description=spell.getDescription(),cooldown=cooldown, style=s(size=12, color=(30,255,0)) )
+                    lines += '</tr>'
+        if sparse.isSoulbindConduit():
+            soulbindConduitRank = self.getSoulbindConduitRank()
+            spell = soulbindConduitRank.getSpell()
+            lines += "<br>"
+            lines += spell.getTooltipText(icon=False, footer=False).replace("font-weight:700;", "")
+        skill = sparse.getSkill()
         if skill :
             lines += '<tr>'
             lines += '<td {style}>Requires {skill} ({skillLevel})</td>'.format(skill=skill.displayName, skillLevel=sparse.requiredSkillRank, style=s(size=12))
@@ -394,7 +472,10 @@ class ItemSearchName (AbstractModel):
     TABLE = {"table":"ItemSearchName", "id_field":"id"}
     def __init__ (self, id, **kwargs):
         super (ItemSearchName, self).__init__(id, **kwargs)
-        self.bl = kwargs.get ("bl", [])
+        self.bl = kwargs.get ("bonus_id", [])
+        self.dropLevel = kwargs.get("drop_level", None)
+        self.overrideItemLevel = None
+        self.overrideQuality = None
 
     def getNameDescription (self):
         bl = self.getBonusList()
@@ -406,20 +487,39 @@ class ItemSearchName (AbstractModel):
             return ItemNameDescription[nameDescId]
 
     def getBonusList (self):
-        return sum([ItemBonus.FromParent(idx, self) for idx in self.bl], [])
+        return sum([ItemBonus.Find ({"id_parent":bonusID})for bonusID in self.bl], [])
+
+    def setItemLevel(self, itemLevel):
+        self.overrideItemLevel = itemLevel
+        return True
 
     def getItemLevel (self):
-        bl = self.getBonusList()
-        ilvl = self.itemLevel
-        for bonus in bl :
-            if bonus.exists() and bonus.type == 1:
-                ilvl+=sum(bonus.value.values())
-        return ilvl
+        if self.overrideItemLevel :
+            return self.overrideItemLevel
+        if self.dropLevel :
+            qualityCurve = {2:1746, 3:1748, 4:1749}
+            quality = self.getQuality()
+            if quality in qualityCurve.keys():
+                interp = CurvePoint.getInterpolation( self.dropLevel, curveID=qualityCurve[quality])
+                return int(interp)
+        else :
+            bl = self.getBonusList()
+            ilvl = self.itemLevel
+            for bonus in bl :
+                if bonus.exists() and bonus.type == 1:
+                    ilvl+=sum(bonus.value.values())
+            return ilvl
 
     def getFlags (self):
         return sum([[f+(i*32) for f in arrayFromB32(x)] for i, x in enumerate(self.flags.values())], [])
 
+    def setQuality(self, quality):
+        self.overrideQuality = quality
+        return True
+
     def getQuality (self):
+        if self.overrideQuality :
+            return self.overrideQuality
         bl = self.getBonusList()
         quality = self.overallQualityID
         for bonus in bl :
@@ -458,6 +558,18 @@ class ItemSparse (ItemSearchName):
             from .skill import SkillLine
             return SkillLine(self.requiredSkill)
 
+    def isShadowlandLegendary (self):
+        bl = self.getBonusList()
+        return any (True if bonus.exists() and bonus.type==31 else False for bonus in bl)
+
+    def isSoulbindConduit (self):
+        # Tricky way to know and do not require to call another DB
+        flags = self.getFlags()
+        flags.sort()
+        if flags == [7,13,16,39,46,47,88,96,98]:
+            return True
+        return False
+
     def getSockets (self, size=15, html=True):
         result = []
         sockets = list(self.socketType.values())
@@ -488,8 +600,9 @@ class ItemSparse (ItemSearchName):
 
     def getStats (self):
         ilvl = self.getItemLevel()
+        if not ilvl :
+            return []
         bl = self.getBonusList()
-        
         propPoints = RandPropPoints[ilvl]
         crMult = CombatRatingsMultByILvl[ilvl] #GameTable
         stamMult = StaminaMultByILvl[ilvl]
@@ -500,6 +613,13 @@ class ItemSparse (ItemSearchName):
         # Tertiary Stats
         excludeTertiaries = (22,23, 64) 
         stats += [{"name":CHR_STATS[bonus.value[1]], "id":bonus.value[1], "alloc":bonus.value[2]} for bonus in bl if bonus.type==2 and bonus.value[1] not in excludeTertiaries]
+
+        # Override Random Stats - Bonus ?
+        overrideStats = [x for x in bl if x.type==25]
+        randomStatsIds = [i for i, stat in enumerate(stats) if stat["id"] in (24,25)]
+        if len (overrideStats) == len(randomStatsIds):
+            for i, bonus in zip(randomStatsIds, overrideStats):
+                stats[i].update({"name":CHR_STATS[bonus.value[1]], "id":bonus.value[1]})
 
         if self.inventoryType in [11,2] : # Neck and Rings
             staminaPenalty = stamMult.jewelryMultiplier
@@ -600,6 +720,11 @@ class ItemArmorShield (AbstractModel):
     def __init__ (self, id, **kwargs):
         super (ItemArmorShield, self).__init__(id, **kwargs)
 
+class ItemDamageAmmo (AbstractModel):
+    TABLE = {"table":"ItemDamageAmmo", "id_field":"id"}
+    def __init__ (self, id, **kwargs):
+        super (ItemDamageAmmo, self).__init__(id, **kwargs)
+
 class ItemDamageOneHand (AbstractModel):
     TABLE = {"table":"ItemDamageOneHand", "id_field":"id"}
     def __init__ (self, id, **kwargs):
@@ -648,6 +773,7 @@ preload = (
     ItemDamageOneHandCaster,
     ItemDamageTwoHand,
     ItemDamageTwoHandCaster,
+    ItemDamageAmmo,
 ) 
 for tbl in preload:
     tbl.All() 

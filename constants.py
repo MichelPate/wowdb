@@ -56,6 +56,7 @@ ITEM_FLAGS = {
     42: 'Caster Weapon',
     63: 'MoP Heroic',
     64: 'Crafting Reagent',
+    98: 'Librams/Totems/Tokens/Relics/Soulbinds',
 }
 SPELL_TARGETS = {
     0: 'NO_TARGET',
